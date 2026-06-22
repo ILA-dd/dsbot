@@ -4,7 +4,6 @@
       "name": "dsbot",
       "script": "bot.py",
       "interpreter": "./venv/bin/python",
-      "cwd": "/root/dsbot",
       "autorestart": true,
       "watch": false,
       "max_restarts": 10,
