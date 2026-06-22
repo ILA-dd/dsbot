@@ -1,13 +1,17 @@
 {
-  "name": "dsbot",
-  "script": "bot.py",
-  "interpreter": "./venv/bin/python",
-  "cwd": "/home/ila/dsbot",
-  "autorestart": true,
-  "watch": false,
-  "max_restarts": 10,
-  "restart_delay": 5000,
-  "env": {
-    "PYTHONUNBUFFERED": "1"
-  }
+  "apps": [
+    {
+      "name": "dsbot",
+      "script": "bot.py",
+      "interpreter": "./venv/bin/python",
+      "cwd": "/root/dsbot",
+      "autorestart": true,
+      "watch": false,
+      "max_restarts": 10,
+      "restart_delay": 5000,
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      }
+    }
+  ]
 }
