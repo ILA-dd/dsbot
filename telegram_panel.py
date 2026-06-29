@@ -436,33 +436,20 @@ class TelegramPanel:
                 file = await self.bot.get_file(file_id)
                 await self.bot.download_file(file.file_path, temp_filename)
 
-                await status_msg.edit_text("✍️ Распознаю речь из голосового сообщения...")
-
-                import ai_helper
-                transcribed_text = await ai_helper.transcribe_audio(temp_filename)
-
-                # Удаляем временный файл после распознавания
-                if os.path.exists(temp_filename):
-                    os.remove(temp_filename)
-
-                if not transcribed_text:
-                    await status_msg.edit_text("❌ Не удалось распознать текст из голосового сообщения.")
-                    return
-
-                await status_msg.edit_text(f"🗣 Озвучиваю в войсе:\n<i>\"{_esc(transcribed_text)}\"</i>")
+                await status_msg.edit_text("🔊 Воспроизвожу ваше голосовое сообщение в Discord...")
 
                 if self.discord_bot:
-                    success = await self.discord_bot.play_tts(transcribed_text)
+                    success = await self.discord_bot.play_audio_file(temp_filename, delete_after=True)
                     if success:
-                        self.state.add_log("Telegram", f"ГС (TTS): {transcribed_text[:20]}")
-                        await status_msg.edit_text(f"✅ Текст озвучен в войсе:\n<i>\"{_esc(transcribed_text)}\"</i>")
+                        self.state.add_log("Telegram", "Голосовое из TG")
+                        await status_msg.edit_text("✅ Голосовое сообщение воспроизведено в войсе!")
                     else:
-                        await status_msg.edit_text("❌ Не удалось воспроизвести озвучку.")
+                        await status_msg.edit_text("❌ Не удалось воспроизвести голосовое сообщение.")
                 else:
                     await status_msg.edit_text("❌ Ошибка связи с Discord-клиентом.")
 
             except Exception as e:
-                print(f"❌ Ошибка при обработке голосового сообщения из TG: {e}")
+                print(f"❌ Ошибка при загрузке/проигрывании голосового из TG: {e}")
                 await status_msg.edit_text(f"❌ Произошла ошибка при обработке голосового: {e}")
                 if os.path.exists(temp_filename):
                     try:
