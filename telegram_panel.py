@@ -366,7 +366,7 @@ class TelegramPanel:
             else:
                 await message.answer("❌ Ошибка связи с Discord-клиентом.")
 
-        @self.dp.message(TTSStates.waiting_for_tts_text)
+        @self.dp.message(TTSStates.waiting_for_tts_text, F.text)
         async def handle_tts_text(message: Message, state: FSMContext):
             if not _is_owner(message.from_user.id):
                 return
@@ -413,7 +413,8 @@ class TelegramPanel:
                     reply_markup=_main_menu_kb(self.state),
                 )
 
-        @self.dp.message(F.voice)
+        from aiogram.filters import StateFilter
+        @self.dp.message(F.voice, StateFilter("*"))
         async def handle_telegram_voice(message: Message, state: FSMContext):
             if not _is_owner(message.from_user.id):
                 return
