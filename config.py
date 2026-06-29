@@ -10,7 +10,7 @@ load_dotenv()
 def _require(var_name: str) -> str:
     """Получить обязательную переменную окружения или завершить программу."""
     value = os.getenv(var_name)
-    if not value or value.startswith("твой") or value.startswith("токен"):
+    if not value or value.startswith(("твой", "токен", "your_")) or value.endswith("_here"):
         print(f"❌ Переменная {var_name} не задана в .env файле!")
         sys.exit(1)
     return value
