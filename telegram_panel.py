@@ -25,29 +25,27 @@ def _is_owner(user_id: int) -> bool:
 
 
 def _main_menu_kb(state) -> InlineKeyboardMarkup:
-    """Главное меню с кнопками."""
-    # Кнопка вкл/выкл зависит от текущего состояния
+    """Главное меню с кнопками в виде эргономичной сетки."""
     if state.is_active:
-        toggle_btn = InlineKeyboardButton(text="💤 Выключить бота", callback_data="toggle_off")
+        toggle_btn = InlineKeyboardButton(text="🟢 Бот: АКТИВЕН", callback_data="toggle_off")
     else:
-        toggle_btn = InlineKeyboardButton(text="⚡ Включить бота", callback_data="toggle_on")
+        toggle_btn = InlineKeyboardButton(text="💤 Бот: ВЫКЛЮЧЕН", callback_data="toggle_on")
 
-    ai_status = "🟢 Вкл" if state.is_ai_active else "🔴 Выкл"
-    ai_btn = InlineKeyboardButton(text=f"🤖 Автоответчик ИИ: {ai_status}", callback_data="toggle_ai")
+    ai_status = "ВКЛ 🤖" if state.is_ai_active else "ВЫКЛ 🔴"
+    ai_btn = InlineKeyboardButton(text=f"ИИ: {ai_status}", callback_data="toggle_ai")
 
     keyboard = [
-        [toggle_btn],
-        [ai_btn],
+        [toggle_btn, ai_btn],
         [
-            InlineKeyboardButton(text="📊 Статистика", callback_data="status"),
-            InlineKeyboardButton(text="🔇 Покинуть войс", callback_data="disconnect_voice"),
+            InlineKeyboardButton(text="🗣️ Озвучка (TTS)", callback_data="tts_prompt"),
+            InlineKeyboardButton(text="🔌 Выйти из войса", callback_data="disconnect_voice"),
         ],
         [
+            InlineKeyboardButton(text="📊 Мониторинг", callback_data="status"),
             InlineKeyboardButton(text="📜 Журнал логов", callback_data="logs"),
-            InlineKeyboardButton(text="⚙️ Настройки AFK", callback_data="settings"),
         ],
         [
-            InlineKeyboardButton(text="🗣 Озвучить текст", callback_data="tts_prompt"),
+            InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings"),
             InlineKeyboardButton(text="🔄 Обновить", callback_data="refresh"),
         ],
     ]
@@ -57,16 +55,16 @@ def _main_menu_kb(state) -> InlineKeyboardMarkup:
 def _settings_kb() -> InlineKeyboardMarkup:
     """Клавиатура настроек."""
     keyboard = [
-        [InlineKeyboardButton(text="📝 Список AFK-ответов", callback_data="settings_afk")],
-        [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_main")],
+        [InlineKeyboardButton(text="📝 Шаблоны AFK", callback_data="settings_afk")],
+        [InlineKeyboardButton(text="◀️ Вернуться в меню", callback_data="back_main")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
 def _back_kb() -> InlineKeyboardMarkup:
-    """Кнопка назад."""
+    """Кнопка возврата в меню."""
     keyboard = [
-        [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_main")],
+        [InlineKeyboardButton(text="◀️ Вернуться в меню", callback_data="back_main")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -171,30 +169,40 @@ class TelegramPanel:
                 return
 
             status = "🟢 <b>Активен</b>" if self.state.is_active else "💤 <b>Выключен</b>"
+            ai_status = "🟢 <b>Включен</b>" if self.state.is_ai_active else "🔴 <b>Выключен</b>"
             voice = f"🔊 <code>{_esc(self.state.current_voice)}</code>" if self.state.current_voice else "🔇 <i>Не подключён</i>"
             uptime = _format_uptime(self.state.uptime_start) if self.state.uptime_start else "—"
             discord_ok = "🟢 <b>В сети</b>" if self.state.discord_ready else "🔴 <b>Оффлайн</b>"
             total_cmds = len(self.state.logs)
+            
+            # AI config details
+            pref_provider = _esc(config.AI_PROVIDER)
+            fallback_order = _esc(config.AI_FALLBACK_ORDER)
 
-            # Последние 3 команды
+            # Последние 5 событий
             recent = ""
             if self.state.logs:
-                for log in self.state.logs[-3:]:
-                    emoji = "🎮" if log["cmd"] in ("!call", "!dota") else "📩" if log["cmd"] == "!tg" else "⚙️"
+                for log in self.state.logs[-5:]:
+                    emoji = "🤖" if log["cmd"] == "ИИ-ответ" else "🗣️" if "TTS" in log["cmd"] or "/say" in log["cmd"] else "🔌" if "войс" in log["cmd"] or "войсе" in log["cmd"] else "⚙️"
                     recent += f"\n  {emoji} <code>{_esc(log['time'])}</code> | <b>{_esc(log['user'])}</b> → <code>{_esc(log['cmd'])}</code>"
             else:
                 recent = "\n  <i>Событий пока нет</i>"
 
             text = (
-                "╔══════════════════════╗\n"
-                "📊 <b>ПОДРОБНЫЙ МОНИТОРИНГ</b>\n"
-                "╚══════════════════════╝\n\n"
-                f"📡 <b>Режим работы:</b> {status}\n"
-                f"🌐 <b>Discord клиент:</b> {discord_ok}\n"
-                f"🎙️ <b>Канал голосовой:</b> {voice}\n"
-                f"⏱️ <b>Время работы (Uptime):</b> <code>{uptime}</code>\n"
-                f"📊 <b>Всего событий в логе:</b> <code>{total_cmds}</code>\n\n"
-                f"🕐 <b>Последние действия:</b>{recent}"
+                "✨ <b>━━━━━━━━━━━━━━━━━━━━━</b> ✨\n"
+                "📊 <b>ПОДРОБНЫЙ МОНИТОРИНГ БОТА</b>\n"
+                "✨ <b>━━━━━━━━━━━━━━━━━━━━━</b> ✨\n\n"
+                f"📡 <b>Сеть Discord:</b> {discord_ok}\n"
+                f"⚡ <b>Режим работы:</b> {status}\n"
+                f"🤖 <b>Автоответчик:</b> {ai_status}\n"
+                f"🎙️ <b>Текущий войс:</b> {voice}\n"
+                f"⏱️ <b>Время работы:</b> <code>{uptime}</code>\n\n"
+                f"⚙️ <b>Настройки ИИ:</b>\n"
+                f"  🔹 Провайдер: <code>{pref_provider}</code>\n"
+                f"  🔹 Очередь fallback: <code>{fallback_order}</code>\n\n"
+                f"📈 <b>Статистика:</b>\n"
+                f"  🔹 Всего событий в логе: <code>{total_cmds}</code>\n\n"
+                f"🕐 <b>Последние 5 событий:</b>{recent}"
             )
 
             await callback.message.edit_text(text, reply_markup=_back_kb())
@@ -226,22 +234,21 @@ class TelegramPanel:
 
             if not self.state.logs:
                 text = (
-                    "╔══════════════════════╗\n"
+                    "✨ <b>━━━━━━━━━━━━━━━━━━━━━</b> ✨\n"
                     "📜 <b>ЖУРНАЛ СОБЫТИЙ</b>\n"
-                    "╚══════════════════════╝\n\n"
+                    "✨ <b>━━━━━━━━━━━━━━━━━━━━━</b> ✨\n\n"
                     "<i>Журнал пуст. Жду активности в Discord... 💤</i>"
                 )
             else:
                 lines = []
-                # Последние 10
-                for log in self.state.logs[-10:]:
-                    emoji = "🎮" if log["cmd"] in ("!call", "!dota") else "📩" if log["cmd"] == "!tg" else "⚙️"
+                for log in self.state.logs[-15:]:
+                    emoji = "🤖" if log["cmd"] == "ИИ-ответ" else "🗣️" if "TTS" in log["cmd"] or "/say" in log["cmd"] else "🔌" if "войс" in log["cmd"] or "войсе" in log["cmd"] else "⚙️"
                     lines.append(f"{emoji} <code>{_esc(log['time'])}</code> | <b>{_esc(log['user'])}</b> → <code>{_esc(log['cmd'])}</code>")
 
                 text = (
-                    "╔══════════════════════╗\n"
+                    "✨ <b>━━━━━━━━━━━━━━━━━━━━━</b> ✨\n"
                     "📜 <b>ЖУРНАЛ СОБЫТИЙ (ЛОГИ)</b>\n"
-                    "╚══════════════════════╝\n\n"
+                    "✨ <b>━━━━━━━━━━━━━━━━━━━━━</b> ✨\n\n"
                     "" + "\n".join(lines)
                 )
 
@@ -254,10 +261,21 @@ class TelegramPanel:
                 await callback.answer("⛔ Нет доступа", show_alert=True)
                 return
 
+            pref_provider = _esc(config.AI_PROVIDER)
+            fallback_order = _esc(config.AI_FALLBACK_ORDER)
+            groq_model = _esc(config.GROQ_MODEL)
+            openrouter_model = _esc(config.OPENROUTER_MODEL)
+
             text = (
-                "╔══════════════════════╗\n"
-                "⚙️ <b>КОНФИГУРАЦИЯ БОТА</b>\n"
-                "╚══════════════════════╝"
+                "✨ <b>━━━━━━━━━━━━━━━━━━━━━</b> ✨\n"
+                "⚙️ <b>КОНФИГУРАЦИЯ СИСТЕМЫ И ИИ</b>\n"
+                "✨ <b>━━━━━━━━━━━━━━━━━━━━━</b> ✨\n\n"
+                f"🤖 <b>Текущие параметры ИИ:</b>\n"
+                f"  🔹 Активный провайдер: <code>{pref_provider}</code>\n"
+                f"  🔹 Очередь fallback: <code>{fallback_order}</code>\n"
+                f"  🔹 Модель Groq: <code>{groq_model}</code>\n"
+                f"  🔹 Модель OpenRouter: <code>{openrouter_model}</code>\n\n"
+                f"ℹ️ <i>Настройки загружаются из .env файла при запуске бота. Для изменения шаблонов ответов нажмите кнопку ниже:</i>"
             )
             await callback.message.edit_text(text, reply_markup=_settings_kb())
             await callback.answer()
@@ -270,12 +288,12 @@ class TelegramPanel:
 
             afk_list = "\n".join(f"  🔹 {i+1}. <i>{_esc(msg)}</i>" for i, msg in enumerate(config.AFK_MESSAGES))
             text = (
-                "╔══════════════════════╗\n"
+                "✨ <b>━━━━━━━━━━━━━━━━━━━━━</b> ✨\n"
                 "📝 <b>СПИСОК AFK-ОТВЕТОВ</b>\n"
-                "╚══════════════════════╝\n\n"
-                "<b>Текущие шаблоны ответов:</b>\n"
+                "✨ <b>━━━━━━━━━━━━━━━━━━━━━</b> ✨\n\n"
+                "<b>Текущие шаблоны автоответов:</b>\n"
                 f"{afk_list}\n\n"
-                "ℹ️ <i>Для изменения отредактируйте переменную AFK_MESSAGES в конфигурационном файле config.py</i>"
+                "ℹ️ <i>Бот выбирает один из этих вариантов случайным образом, когда автоответчик ИИ выключен или дает сбой. Вы можете изменить их в config.py.</i>"
             )
             await callback.message.edit_text(text, reply_markup=_back_kb())
             await callback.answer()
@@ -490,18 +508,22 @@ class TelegramPanel:
 
 def _build_main_text_simple(state) -> str:
     """Текст главного меню (HTML)."""
-    status = "🟢 <b>АКТИВЕН</b>" if state.is_active else "💤 <b>ВЫКЛЮЧЕН</b> (режим ожидания)"
+    status = "🟢 <b>АКТИВЕН</b>" if state.is_active else "💤 <b>ВЫКЛЮЧЕН (ожидание)</b>"
+    ai_status = "🟢 <b>ВКЛЮЧЕН</b>" if state.is_ai_active else "🔴 <b>ВЫКЛЮЧЕН</b>"
     voice = f"🔊 <code>{_esc(state.current_voice)}</code>" if state.current_voice else "🔇 <i>Не в войсе</i>"
     uptime = _format_uptime(state.uptime_start) if state.uptime_start else "—"
     discord_user = f"👤 <code>{_esc(state.discord_username)}</code>" if state.discord_username else "⏳ <i>Авторизация...</i>"
+    discord_ok = "🟢 <b>В сети</b>" if state.discord_ready else "🔴 <b>Вне сети</b>"
 
     return (
-        "╔══════════════════════╗\n"
-        "🎮 <b>DISCORD SELF-BOT PANEL</b>\n"
-        "╚══════════════════════╝\n\n"
-        f"<b>👤 Аккаунт:</b> {discord_user}\n"
-        f"<b>⚡ Режим:</b> {status}\n"
-        f"<b>🎙️ Войс:</b> {voice}\n"
-        f"<b>⏱️ Uptime:</b> <code>{uptime}</code>\n\n"
-        "📊 <i>Выберите действие на панели управления ниже:</i>"
+        "✨ <b>━━━━━━━━━━━━━━━━━━━━━</b> ✨\n"
+        "🎮 <b>DISCORD SELF-BOT CONTROL PANEL</b>\n"
+        "✨ <b>━━━━━━━━━━━━━━━━━━━━━</b> ✨\n\n"
+        f"👤 <b>Аккаунт:</b> {discord_user}\n"
+        f"📡 <b>Статус сети:</b> {discord_ok}\n"
+        f"⚡ <b>Режим работы:</b> {status}\n"
+        f"🤖 <b>Автоответчик:</b> {ai_status}\n"
+        f"🎙️ <b>Текущий войс:</b> {voice}\n"
+        f"⏱️ <b>Время работы:</b> <code>{uptime}</code>\n\n"
+        "⚙️ <i>Выберите действие на панели управления:</i>"
     )

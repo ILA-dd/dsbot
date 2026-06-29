@@ -24,6 +24,7 @@ class DiscordSelfBot(discord.Client):
         self.voice_timestamps = {}  # user_id: datetime
         self.user_styles = {}  # user_id: style_description (кэш стилей общения)
         self.ai_tasks = {}  # user_id: active asyncio Task for AI response (debounce)
+        self.voice_transcripts = {}  # msg_id: transcribed_text (кэш для голосовых сообщений)
 
     def _should_send_greeting(self, user_id: int) -> bool:
         """
@@ -155,7 +156,7 @@ class DiscordSelfBot(discord.Client):
         else:
             # Любое другое сообщение — показываем список команд или отвечаем через ИИ
             if not self.state.is_active:
-                if self.state.is_ai_active and config.GEMINI_API_KEY:
+                if self.state.is_ai_active and (config.GEMINI_API_KEY or config.OPENROUTER_API_KEY or config.GROQ_API_KEY):
                     self.ai_tasks[user_id] = asyncio.create_task(self._respond_with_ai(message))
                 else:
                     # Бот выключен и ИИ-автоответчик выключен — ничего не пишем
@@ -474,6 +475,106 @@ class DiscordSelfBot(discord.Client):
             # бот проанализировал свежую историю (с учётом новых ручных сообщений).
             self.user_styles.clear()
 
+    async def _get_message_data(self, msg: discord.Message) -> tuple[str, dict | None]:
+        """
+        Возвращает кортеж (текст_сообщения, данные_картинки).
+        данные_картинки имеет формат {"data": base64_str, "mime_type": str} или None.
+        Если это голосовое сообщение, транскрибирует его.
+        """
+        text = msg.content or ""
+        image_data = None
+
+        # Проверяем вложения
+        if msg.attachments:
+            audio_att = None
+            image_att = None
+            
+            for att in msg.attachments:
+                filename_lower = att.filename.lower()
+                
+                # Проверка на аудио
+                is_audio = (
+                    filename_lower.endswith(('.ogg', '.wav', '.mp3', '.m4a', '.aac', '.mp4')) or
+                    (att.content_type and att.content_type.startswith('audio/'))
+                )
+                if is_audio and not audio_att:
+                    audio_att = att
+                    continue
+                    
+                # Проверка на картинку
+                is_image = (
+                    filename_lower.endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif')) or
+                    (att.content_type and att.content_type.startswith('image/'))
+                )
+                if is_image and not image_att:
+                    image_att = att
+                    continue
+            
+            # 1. Если нашли голосовое сообщение и нет текста
+            if audio_att and not text:
+                if msg.id in self.voice_transcripts:
+                    text = f"[Голосовое сообщение]: {self.voice_transcripts[msg.id]}"
+                else:
+                    import uuid
+                    import os
+                    temp_name = f"/tmp/discord_voice_{uuid.uuid4().hex}.ogg"
+                    try:
+                        await audio_att.save(temp_name)
+                        transcribed = await ai_helper.transcribe_audio(temp_name)
+                        if transcribed:
+                            self.voice_transcripts[msg.id] = transcribed
+                            text = f"[Голосовое сообщение]: {transcribed}"
+                        else:
+                            text = "[Голосовое сообщение] (не удалось распознать)"
+                    except Exception as e:
+                        print(f"❌ Ошибка скачивания/распознавания ГС в Discord: {e}")
+                        text = "[Голосовое сообщение]"
+                    finally:
+                        if os.path.exists(temp_name):
+                            try:
+                                os.remove(temp_name)
+                            except:
+                                pass
+            
+            # 2. Если нашли картинку
+            if image_att:
+                import uuid
+                import os
+                import base64
+                # Определяем расширение
+                ext = ".png"
+                if image_att.filename:
+                    _, file_ext = os.path.splitext(image_att.filename.lower())
+                    if file_ext in ['.png', '.jpg', '.jpeg', '.webp', '.gif']:
+                        ext = file_ext
+                
+                temp_img = f"/tmp/discord_img_{uuid.uuid4().hex}{ext}"
+                try:
+                    await image_att.save(temp_img)
+                    with open(temp_img, "rb") as f:
+                        b64_data = base64.b64encode(f.read()).decode("utf-8")
+                    
+                    mime_type = image_att.content_type or f"image/{ext.lstrip('.')}"
+                    if mime_type == "image/jpg":
+                        mime_type = "image/jpeg"
+                        
+                    image_data = {
+                        "data": b64_data,
+                        "mime_type": mime_type
+                    }
+                    if not text:
+                        text = "[Изображение]"
+                except Exception as e:
+                    print(f"❌ Ошибка скачивания/обработки изображения в Discord: {e}")
+                finally:
+                    if os.path.exists(temp_img):
+                        try:
+                            os.remove(temp_img)
+                        except:
+                            pass
+
+        return text, image_data
+
     async def _respond_with_ai(self, message: discord.Message):
         """Интеграция ИИ для ответов в ЛС при отключенном боте с дебаунсом."""
         user_id = message.author.id
@@ -485,6 +586,7 @@ class DiscordSelfBot(discord.Client):
 
             # Отображаем статус "печатает" в Discord, пока работает ИИ
             async with message.channel.typing():
+                start_time = asyncio.get_event_loop().time()
                 recent_msgs = []
                 now_utc = datetime.now(timezone.utc)
 
@@ -492,15 +594,18 @@ class DiscordSelfBot(discord.Client):
                 async for msg in message.channel.history(limit=30):
                     if len(recent_msgs) >= 10:
                         break
-                    if not msg.content:
+                    
+                    msg_text, img_data = await self._get_message_data(msg)
+                    if not msg_text and not img_data:
                         continue
-                    if self._is_auto_reply(msg.content):
+                    if msg_text and self._is_auto_reply(msg_text):
                         continue
                     
                     time_ago = self._get_time_ago_str(msg.created_at, now_utc)
                     recent_msgs.append({
                         "is_self": msg.author.id == self.user.id,
-                        "text": msg.content,
+                        "text": msg_text,
+                        "image": img_data,
                         "time_ago": time_ago
                     })
                 recent_msgs.reverse()
@@ -515,8 +620,10 @@ class DiscordSelfBot(discord.Client):
                         "Ты — владелец этого аккаунта Discord (человек, парень). Тебе пишет твой знакомый или друг.\n"
                         "Твоя задача — написать ответ собеседнику от первого лица.\n"
                         "Отвечай максимально коротко (1-4 слова), в простом разговорном тоне, строчными буквами без знаков препинания в конце.\n"
+                        "Не пиши длинные сообщения без необходимости, без воды, и никогда не повторяй одну и ту же букву или слово (никаких 'аааааа').\n"
                         "КРИТИЧЕСКИ ВАЖНО: Ты человек, а не ИИ. Никаких формальностей, вежливых клише, смайликов и упоминаний ИИ/ботов.\n"
-                        "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО добавлять в свой ответ любые временные метки вроде '[только что]', '[5 мин. назад]' и т.д."
+                        "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО добавлять в свой ответ любые временные метки вроде '[только что]', '[5 мин. назад]' и т.д.\n"
+                        "Отвечай ОДНИМ сообщением в ОДНУ строку. НЕ переноси строки и не разбивай ответ на несколько строк/сообщений."
                     )
                 else:
                     system_instruction = (
@@ -529,20 +636,39 @@ class DiscordSelfBot(discord.Client):
                         f"   - Если он дружелюбен — будь дружелюбен.\n"
                         f"   - Если он матерится, агрессирует, наезжает или оскорбляет тебя (использует слова вроде 'уебан', 'мразь' и т.д.) — отвечай ВЗАИМНО ЖЕСТКО, грубо и с матом (например: 'сам ты мразь', 'ебальник прикрой', 'завали ебало', 'пошел нахуй'). Отвечай один в один по уровню токсичности. Не пиши детские отмазки вроде 'сам такой' and не добавляй смайлики вроде '🔇', если тебя оскорбляют.\n"
                         f"3. Отвечай максимально коротко (1-4 слова, максимум одно короткое предложение), как при реальной перепалке.\n"
+                        f"   - Не пиши длинные сообщения без необходимости, без воды, и никогда не повторяй одну и ту же букву или слово (никаких 'аааааа').\n"
                         f"4. Соблюдай особенности письма: пиши строчными буквами без знаков препинания в конце, если это твой привычный стиль.\n"
-                        f"5. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО добавлять в свой ответ любые временные метки в квадратных скобках (например, '[только что]', '[5 мин. назад]')."
+                        f"5. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО добавлять в свой ответ любые временные метки в квадратных скобках (например, '[только что]', '[5 мин. назад]').\n"
+                        f"6. Отвечай ОДНИМ сообщением в ОДНУ строку. НЕ переноси строки и не разбивай ответ на несколько строк/сообщений."
                     )
 
                 reply_text = await ai_helper.generate_response(system_instruction, recent_msgs)
 
+                # Получаем/транскрибируем входящее сообщение для уведомлений Telegram
+                incoming_text, incoming_image = await self._get_message_data(message)
+
                 # Отправляем ответ и уведомляем владельца в Telegram
                 if reply_text:
+                    generation_time = asyncio.get_event_loop().time() - start_time
+                    # Симуляция скорости печатания человека: от 5 до 9 символов в секунду
+                    typing_speed = random.uniform(5.0, 9.0)
+                    required_typing_time = len(reply_text) / typing_speed
+                    # Ограничиваем максимальное время печатания 8 секундами
+                    required_typing_time = min(required_typing_time, 8.0)
+                    
+                    remaining_typing_time = required_typing_time - generation_time
+                    if remaining_typing_time > 0:
+                        await asyncio.sleep(remaining_typing_time)
+                        
                     await message.channel.send(reply_text)
                     self.state.add_log(username, "ИИ-ответ")
                     
                     # Экранируем HTML-символы для Telegram панели
                     esc_reply = reply_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                    esc_incoming = message.content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    esc_incoming = incoming_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    if incoming_image:
+                        esc_incoming = f"🖼️ [Изображение] {esc_incoming}"
+                        
                     await self.tg_notify(
                         f"🤖 <b>ИИ ответил за вас в Discord!</b>\n"
                         f"👤 Собеседник: <code>{username}</code>\n"
@@ -556,7 +682,10 @@ class DiscordSelfBot(discord.Client):
                         afk_msg = random.choice(config.AFK_MESSAGES)
                         await message.channel.send(afk_msg)
                         
-                        esc_incoming = message.content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                        esc_incoming = incoming_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                        if incoming_image:
+                            esc_incoming = f"🖼️ [Изображение] {esc_incoming}"
+                            
                         await self.tg_notify(
                             f"📩 <b>AFK-фолбэк (сбой ИИ)</b>\n"
                             f"👤 От: <code>{username}</code>\n"

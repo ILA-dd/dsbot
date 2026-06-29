@@ -62,53 +62,229 @@ async def _call_gemini(model: str, payload: dict) -> str | None:
     return None
 
 import re
+import random
 
-def clean_response(text: str) -> str:
-    """Очищает сгенерированный ответ ИИ от случайных префиксов времени в квадратных скобках."""
+SLANG_FALLBACKS = [
+    "че", "а че", "да ладно", "ясно", "пофиг", "бля", "че за бред", "да не", "ппц", "мда", "хз", "лан", "пон"
+]
+
+def get_slang_fallback() -> str:
+    return random.choice(SLANG_FALLBACKS)
+
+def is_refusal(text: str) -> bool:
+    """Проверяет, является ли ответ стандартным отказом ИИ по безопасности/этике."""
     if not text:
-        return text
-    # Удаляем точные префиксы относительного времени в квадратных скобках в начале сообщения,
-    # например [только что], [5 мин. назад], [2 ч. назад], [1 дн. назад]
-    cleaned = re.sub(r'^\[(?:только что|\d+\s*(?:мин\.|ч\.|дн\.)\s*назад)\]\s*', '', text)
-    return cleaned.strip()
+        return False
+    lower_text = text.lower()
+    refusal_patterns = [
+        "i am sorry",
+        "i'm sorry",
+        "i cannot",
+        "i am not able",
+        "i'm not able",
+        "i'm not going to continue",
+        "i am not going to continue",
+        "cannot continue this conversation",
+        "as an ai",
+        "as a large language model",
+        "my safety guidelines",
+        "ethical guidelines",
+        "я не могу",
+        "я не буду",
+        "не могу ответить",
+        "извините, но я",
+        "не могу продолжать",
+        "прости, но я"
+    ]
+    for pattern in refusal_patterns:
+        if pattern in lower_text:
+            return True
+    return False
 
-async def generate_response(system_instruction: str, history_messages: list[dict]) -> str:
-    """Генерация ответа через OpenRouter с фолбэком на Gemini."""
-    # 1. Сначала пробуем OpenRouter, если есть API-ключ
-    if config.OPENROUTER_API_KEY:
-        # Форматируем историю для OpenRouter (OpenAI-совместимый формат)
+def merge_consecutive_messages(history_messages: list[dict]) -> list[dict]:
+    """
+    Объединяет подряд идущие сообщения от одного и того же отправителя в одно.
+    Каждое новое сообщение внутри блока начинается с новой строки с его таймстампом.
+    Картинки сохраняются в списке `images` соответствующего блока.
+    """
+    merged = []
+    for msg in history_messages:
+        role_is_self = msg["is_self"]
+        text = msg["text"]
+        time_ago = msg.get("time_ago")
+        image = msg.get("image")
+        
+        # Форматируем текст с таймстампом, если он есть
+        formatted_text = text
+        if time_ago:
+            formatted_text = f"[{time_ago}] {text}"
+            
+        if merged and merged[-1]["is_self"] == role_is_self:
+            merged[-1]["text"] += f"\n{formatted_text}"
+            if image:
+                if "images" not in merged[-1]:
+                    merged[-1]["images"] = []
+                merged[-1]["images"].append(image)
+        else:
+            merged.append({
+                "is_self": role_is_self,
+                "text": formatted_text,
+                "images": [image] if image else []
+            })
+    return merged
+
+async def _call_groq(model: str, messages: list[dict]) -> str | None:
+    """Внутренний хелпер для выполнения запроса к Groq API."""
+    if not config.GROQ_API_KEY:
+        return None
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {config.GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.7,
+        "max_tokens": 250
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if 'choices' in data and len(data['choices']) > 0:
+                        content = data['choices'][0]['message']['content']
+                        if content:
+                            return content.strip()
+                else:
+                    err_text = await resp.text()
+                    print(f"❌ Groq API ({model}) response error ({resp.status}): {err_text}")
+    except Exception as e:
+        print(f"❌ Groq API ({model}) request failed: {e}")
+    return None
+
+async def do_call_provider(provider: str, system_instruction: str, merged_history: list[dict]) -> str | None:
+    """Выполняет вызов конкретного API-провайдера с его моделями и настройками."""
+    provider = provider.strip().lower()
+    has_images = any(len(msg.get("images", [])) > 0 for msg in merged_history)
+    
+    if provider == "groq":
+        if not config.GROQ_API_KEY:
+            return None
+            
         messages = [{"role": "system", "content": system_instruction}]
-        for msg in history_messages:
+        for msg in merged_history:
             role = "assistant" if msg["is_self"] else "user"
-            content = msg["text"]
-            if "time_ago" in msg:
-                content = f"[{msg['time_ago']}] {content}"
-            messages.append({"role": role, "content": content})
-
-        openrouter_models = [
-            "meta-llama/llama-3-8b-instruct:free",
-            "google/gemma-2-9b-it:free",
-            "openrouter/auto"
-        ]
+            if msg.get("images"):
+                content_list = [{"type": "text", "text": msg["text"]}]
+                for img in msg["images"]:
+                    content_list.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{img['mime_type']};base64,{img['data']}"
+                        }
+                    })
+                messages.append({"role": role, "content": content_list})
+            else:
+                messages.append({"role": role, "content": msg["text"]})
+            
+        groq_models = []
+        if has_images:
+            groq_models.extend([
+                "llama-3.2-11b-vision-preview",
+                "llama-3.2-90b-vision-preview"
+            ])
+        else:
+            if config.GROQ_MODEL:
+                groq_models.append(config.GROQ_MODEL)
+            groq_models.extend([
+                "llama-3.3-70b-specdec",
+                "llama-3.1-70b-versatile",
+                "llama3-70b-8192",
+                "gemma2-9b-it"
+            ])
+            
+        # Убираем дубликаты
+        seen = set()
+        groq_models = [m for m in groq_models if m and not (m in seen or seen.add(m))]
+        
+        for model in groq_models:
+            print(f"🤖 Пробую сгенерировать ответ через Groq ({model})...")
+            res = await _call_groq(model, messages)
+            if res and not is_refusal(res):
+                return clean_response(res)
+                
+    elif provider == "openrouter":
+        if not config.OPENROUTER_API_KEY:
+            return None
+            
+        messages = [{"role": "system", "content": system_instruction}]
+        for msg in merged_history:
+            role = "assistant" if msg["is_self"] else "user"
+            if msg.get("images"):
+                content_list = [{"type": "text", "text": msg["text"]}]
+                for img in msg["images"]:
+                    content_list.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{img['mime_type']};base64,{img['data']}"
+                        }
+                    })
+                messages.append({"role": role, "content": content_list})
+            else:
+                messages.append({"role": role, "content": msg["text"]})
+            
+        openrouter_models = []
+        if config.OPENROUTER_MODEL:
+            openrouter_models.append(config.OPENROUTER_MODEL)
+            
+        openrouter_models.append("qwen/qwen3.6-27b")
+        openrouter_models.append("qwen/qwen-2.5-vl-72b")
+        
+        if has_images:
+            openrouter_models.extend([
+                "google/gemini-2.5-flash",
+                "meta-llama/llama-3.2-11b-vision-instruct:free",
+                "qwen/qwen-2.5-vl-72b"
+            ])
+        else:
+            openrouter_models.extend([
+                "meta-llama/llama-3-8b-instruct:free",
+                "google/gemma-2-9b-it:free",
+                "openrouter/auto"
+            ])
+            
+        # Убираем дубликаты
+        seen = set()
+        openrouter_models = [m for m in openrouter_models if m and not (m in seen or seen.add(m))]
+        
         for model in openrouter_models:
             print(f"🤖 Пробую сгенерировать ответ через OpenRouter ({model})...")
             res = await _call_openrouter(model, messages)
-            if res:
+            if res and not is_refusal(res):
                 return clean_response(res)
-
-    # 2. Если OpenRouter не настроен или дал ошибку — пробуем Gemini
-    if config.GEMINI_API_KEY:
-        # Форматируем историю для Gemini
+                
+    elif provider == "gemini":
+        if not config.GEMINI_API_KEY:
+            return None
         contents = []
-        for msg in history_messages:
+        for msg in merged_history:
             role = "model" if msg["is_self"] else "user"
-            content = msg["text"]
-            if "time_ago" in msg:
-                content = f"[{msg['time_ago']}] {content}"
+            parts = [{"text": msg["text"]}]
+            if msg.get("images"):
+                for img in msg["images"]:
+                    parts.append({
+                        "inlineData": {
+                            "mimeType": img["mime_type"],
+                            "data": img["data"]
+                        }
+                    })
             contents.append({
                 "role": role,
-                "parts": [{"text": content}]
+                "parts": parts
             })
+            
         payload = {
             "contents": contents,
             "systemInstruction": {"parts": [{"text": system_instruction}]},
@@ -130,11 +306,57 @@ async def generate_response(system_instruction: str, history_messages: list[dict
             print(f"🤖 Пробую сгенерировать ответ через Gemini ({model})...")
             res = await _call_gemini(model, payload)
             if res == "SAFETY_BLOCKED":
-                return "а че"
-            if res:
+                continue
+            if res and not is_refusal(res):
                 return clean_response(res)
+                
+    return None
 
-    return ""
+def clean_response(text: str) -> str:
+    """Очищает сгенерированный ответ ИИ от случайных префиксов времени в квадратных скобках."""
+    if not text:
+        return text
+    # Удаляем точные префиксы относительного времени в квадратных скобках в начале сообщения,
+    # например [только что], [5 мин. назад], [2 ч. назад], [1 дн. назад]
+    cleaned = re.sub(r'^\[(?:только что|\d+\s*(?:мин\.|ч\.|дн\.)\s*назад)\]\s*', '', text)
+    return cleaned.strip()
+
+async def generate_response(system_instruction: str, history_messages: list[dict]) -> str:
+    """Генерация ответа через Groq, OpenRouter или Gemini с поддержкой fallback-очереди."""
+    merged_history = merge_consecutive_messages(history_messages)
+    if not merged_history:
+        return get_slang_fallback()
+
+    # Очередь провайдеров для попыток
+    providers_to_try = []
+    preferred = config.AI_PROVIDER.strip().lower() if config.AI_PROVIDER else "fallback"
+    
+    # Парсим настройки fallback
+    fallback_order = []
+    if config.AI_FALLBACK_ORDER:
+        fallback_order = [p.strip().lower() for p in config.AI_FALLBACK_ORDER.split(",") if p.strip()]
+    if not fallback_order:
+        fallback_order = ["groq", "openrouter", "gemini"]
+        
+    if preferred in ["groq", "openrouter", "gemini"]:
+        providers_to_try.append(preferred)
+        for p in fallback_order:
+            if p not in providers_to_try:
+                providers_to_try.append(p)
+    else:
+        providers_to_try = fallback_order
+
+    # Пробуем по очереди
+    for provider in providers_to_try:
+        try:
+            res = await do_call_provider(provider, system_instruction, merged_history)
+            if res:
+                return res
+        except Exception as e:
+            print(f"❌ Ошибка при вызове провайдера {provider}: {e}")
+
+    # Если все провайдеры дали сбой или отказались отвечать, возвращаем сленговый фолбэк
+    return get_slang_fallback()
 
 async def analyze_style(chat_history: list[dict], self_username: str) -> str:
     """Анализирует стиль общения через OpenRouter с фолбэком на Gemini."""

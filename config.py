@@ -24,6 +24,11 @@ TELEGRAM_CHAT_ID: int = int(_require("TELEGRAM_CHAT_ID"))
 # === Дополнительно (ИИ-автоответчик) ===
 GEMINI_API_KEY: str | None = os.getenv("GEMINI_API_KEY")
 OPENROUTER_API_KEY: str | None = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "google/gemini-2.5-flash")
+GROQ_API_KEY: str | None = os.getenv("GROQ_API_KEY")
+GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-specdec")
+AI_PROVIDER: str = os.getenv("AI_PROVIDER", "fallback")
+AI_FALLBACK_ORDER: str = os.getenv("AI_FALLBACK_ORDER", "groq,openrouter,gemini")
 
 # === AFK-сообщения ===
 AFK_MESSAGES: list[str] = [
