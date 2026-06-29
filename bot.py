@@ -14,6 +14,7 @@ class BotState:
 
     def __init__(self):
         self.is_active: bool = True
+        self.is_ai_active: bool = True
         self.current_voice: str | None = None
         self.discord_username: str | None = None
         self.discord_ready: bool = False
@@ -46,10 +47,10 @@ async def main():
     # Discord бот будет передан позже
     tg_panel = TelegramPanel(bot_state=state, discord_bot_ref=None)
 
-    # Создаём Discord бот с функцией отправки уведомлений
+    # Создаём Discord бот с ссылкой на Telegram панель
     discord_bot = DiscordSelfBot(
         bot_state=state,
-        telegram_notify_func=tg_panel.send_notification,
+        tg_panel=tg_panel,
     )
 
     # Передаём ссылку на Discord бот в Telegram панель
@@ -64,7 +65,7 @@ async def main():
             await discord_bot.start(config.DISCORD_TOKEN)
         except Exception as e:
             print(f"❌ Discord ошибка: {e}")
-            await tg_panel.send_notification(f"❌ *Discord ошибка:*\n`{e}`")
+            await tg_panel.send_notification(f"❌ <b>Discord ошибка:</b>\n<code>{e}</code>")
 
     async def run_telegram():
         try:

@@ -8,8 +8,15 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKe
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.utils.markdown import html_decoration as hd
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
 
 import config
+
+
+class TTSStates(StatesGroup):
+    waiting_for_tts_text = State()
 
 
 def _is_owner(user_id: int) -> bool:
@@ -19,27 +26,29 @@ def _is_owner(user_id: int) -> bool:
 
 def _main_menu_kb(state) -> InlineKeyboardMarkup:
     """Главное меню с кнопками."""
-    status_emoji = "🟢" if state.is_active else "🔴"
-    voice_emoji = "🔊" if state.current_voice else "🔇"
-
     # Кнопка вкл/выкл зависит от текущего состояния
     if state.is_active:
-        toggle_btn = InlineKeyboardButton(text="🔴 Выключить", callback_data="toggle_off")
+        toggle_btn = InlineKeyboardButton(text="💤 Выключить бота", callback_data="toggle_off")
     else:
-        toggle_btn = InlineKeyboardButton(text="🟢 Включить", callback_data="toggle_on")
+        toggle_btn = InlineKeyboardButton(text="⚡ Включить бота", callback_data="toggle_on")
+
+    ai_status = "🟢 Вкл" if state.is_ai_active else "🔴 Выкл"
+    ai_btn = InlineKeyboardButton(text=f"🤖 Автоответчик ИИ: {ai_status}", callback_data="toggle_ai")
 
     keyboard = [
         [toggle_btn],
+        [ai_btn],
         [
-            InlineKeyboardButton(text="📊 Статус", callback_data="status"),
-            InlineKeyboardButton(text="🔌 Выйти из войса", callback_data="disconnect_voice"),
+            InlineKeyboardButton(text="📊 Статистика", callback_data="status"),
+            InlineKeyboardButton(text="🔇 Покинуть войс", callback_data="disconnect_voice"),
         ],
         [
-            InlineKeyboardButton(text="📝 Логи", callback_data="logs"),
-            InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings"),
+            InlineKeyboardButton(text="📜 Журнал логов", callback_data="logs"),
+            InlineKeyboardButton(text="⚙️ Настройки AFK", callback_data="settings"),
         ],
         [
-            InlineKeyboardButton(text="🔄 Обновить меню", callback_data="refresh"),
+            InlineKeyboardButton(text="🗣 Озвучить текст", callback_data="tts_prompt"),
+            InlineKeyboardButton(text="🔄 Обновить", callback_data="refresh"),
         ],
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -48,8 +57,8 @@ def _main_menu_kb(state) -> InlineKeyboardMarkup:
 def _settings_kb() -> InlineKeyboardMarkup:
     """Клавиатура настроек."""
     keyboard = [
-        [InlineKeyboardButton(text="📝 AFK-сообщения", callback_data="settings_afk")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")],
+        [InlineKeyboardButton(text="📝 Список AFK-ответов", callback_data="settings_afk")],
+        [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_main")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -57,7 +66,7 @@ def _settings_kb() -> InlineKeyboardMarkup:
 def _back_kb() -> InlineKeyboardMarkup:
     """Кнопка назад."""
     keyboard = [
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")],
+        [InlineKeyboardButton(text="◀️ Назад в меню", callback_data="back_main")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -76,30 +85,14 @@ def _format_uptime(start_time: datetime) -> str:
 
 def _build_main_text(state) -> str:
     """Текст главного меню."""
-    status = "🟢 Активен" if state.is_active else "🔴 Отключён"
-    voice = f"🔊 `{state.current_voice}`" if state.current_voice else "🔇 Не подключён"
-    uptime = _format_uptime(state.uptime_start) if state.uptime_start else "—"
-    discord_user = f"`{state.discord_username}`" if state.discord_username else "⏳ Подключение..."
-
-    return (
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🎮 *Discord Self\\-Bot*\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "\n"
-        f"👤 Аккаунт: {_escape_md(discord_user)}\n"
-        f"📡 Статус: {_escape_md(status)}\n"
-        f"🎙️ Войс: {_escape_md(voice)}\n"
-        f"⏱️ Uptime: `{uptime}`\n"
-        "\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "Выбери действие:"
-    )
+    return _build_main_text_simple(state)
 
 
-def _escape_md(text: str) -> str:
-    """Экранирование спецсимволов MarkdownV2 — пропускаем уже обёрнутое в backticks."""
-    # Для простоты не экранируем — используем обычный Markdown
-    return text
+def _esc(text: str) -> str:
+    """Экранирование HTML-спецсимволов для Telegram HTML parse mode."""
+    if text is None:
+        return ""
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 class TelegramPanel:
@@ -110,7 +103,7 @@ class TelegramPanel:
         self.discord_bot = discord_bot_ref  # ссылка на Discord бот (для управления войсом)
         self.bot = Bot(
             token=config.TELEGRAM_BOT_TOKEN,
-            default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML),
         )
         self.dp = Dispatcher()
         self._register_handlers()
@@ -144,7 +137,10 @@ class TelegramPanel:
             if not _is_owner(callback.from_user.id):
                 await callback.answer("⛔ Нет доступа", show_alert=True)
                 return
-            self.state.is_active = True
+            if self.discord_bot:
+                await self.discord_bot.set_active(True)
+            else:
+                self.state.is_active = True
             self.state.add_log("Telegram", "Бот включён")
             await callback.answer("✅ Бот включён!")
             await callback.message.edit_text(
@@ -157,9 +153,12 @@ class TelegramPanel:
             if not _is_owner(callback.from_user.id):
                 await callback.answer("⛔ Нет доступа", show_alert=True)
                 return
-            self.state.is_active = False
+            if self.discord_bot:
+                await self.discord_bot.set_active(False)
+            else:
+                self.state.is_active = False
             self.state.add_log("Telegram", "Бот выключен")
-            await callback.answer("🔴 Бот выключен! Отвечаю AFK-сообщениями.")
+            await callback.answer("🔴 Бот выключен!")
             await callback.message.edit_text(
                 _build_main_text_simple(self.state),
                 reply_markup=_main_menu_kb(self.state),
@@ -171,31 +170,31 @@ class TelegramPanel:
                 await callback.answer("⛔ Нет доступа", show_alert=True)
                 return
 
-            status = "🟢 Активен" if self.state.is_active else "🔴 Отключён"
-            voice = f"🔊 {self.state.current_voice}" if self.state.current_voice else "🔇 Не подключён"
+            status = "🟢 <b>Активен</b>" if self.state.is_active else "💤 <b>Выключен</b>"
+            voice = f"🔊 <code>{_esc(self.state.current_voice)}</code>" if self.state.current_voice else "🔇 <i>Не подключён</i>"
             uptime = _format_uptime(self.state.uptime_start) if self.state.uptime_start else "—"
-            discord_ok = "✅ Подключён" if self.state.discord_ready else "❌ Не подключён"
+            discord_ok = "🟢 <b>В сети</b>" if self.state.discord_ready else "🔴 <b>Оффлайн</b>"
             total_cmds = len(self.state.logs)
 
             # Последние 3 команды
             recent = ""
             if self.state.logs:
                 for log in self.state.logs[-3:]:
-                    recent += f"\n  • `{log['user']}` → `{log['cmd']}` ({log['time']})"
+                    emoji = "🎮" if log["cmd"] in ("!call", "!dota") else "📩" if log["cmd"] == "!tg" else "⚙️"
+                    recent += f"\n  {emoji} <code>{_esc(log['time'])}</code> | <b>{_esc(log['user'])}</b> → <code>{_esc(log['cmd'])}</code>"
             else:
-                recent = "\n  Пока нет"
+                recent = "\n  <i>Событий пока нет</i>"
 
             text = (
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                "📊 *Подробный статус*\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                "\n"
-                f"📡 Режим: {status}\n"
-                f"🌐 Discord: {discord_ok}\n"
-                f"🎙️ Войс: {voice}\n"
-                f"⏱️ Uptime: `{uptime}`\n"
-                f"📊 Всего команд: `{total_cmds}`\n"
-                f"\n🕐 *Последние команды:*{recent}"
+                "╔══════════════════════╗\n"
+                "📊 <b>ПОДРОБНЫЙ МОНИТОРИНГ</b>\n"
+                "╚══════════════════════╝\n\n"
+                f"📡 <b>Режим работы:</b> {status}\n"
+                f"🌐 <b>Discord клиент:</b> {discord_ok}\n"
+                f"🎙️ <b>Канал голосовой:</b> {voice}\n"
+                f"⏱️ <b>Время работы (Uptime):</b> <code>{uptime}</code>\n"
+                f"📊 <b>Всего событий в логе:</b> <code>{total_cmds}</code>\n\n"
+                f"🕐 <b>Последние действия:</b>{recent}"
             )
 
             await callback.message.edit_text(text, reply_markup=_back_kb())
@@ -227,23 +226,23 @@ class TelegramPanel:
 
             if not self.state.logs:
                 text = (
-                    "━━━━━━━━━━━━━━━━━━━━━━\n"
-                    "📝 *Логи*\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━\n"
-                    "\nПока ничего не произошло 🤷"
+                    "╔══════════════════════╗\n"
+                    "📜 <b>ЖУРНАЛ СОБЫТИЙ</b>\n"
+                    "╚══════════════════════╝\n\n"
+                    "<i>Журнал пуст. Жду активности в Discord... 💤</i>"
                 )
             else:
                 lines = []
                 # Последние 10
                 for log in self.state.logs[-10:]:
                     emoji = "🎮" if log["cmd"] in ("!call", "!dota") else "📩" if log["cmd"] == "!tg" else "⚙️"
-                    lines.append(f"{emoji} `{log['time']}` — *{log['user']}* → `{log['cmd']}`")
+                    lines.append(f"{emoji} <code>{_esc(log['time'])}</code> | <b>{_esc(log['user'])}</b> → <code>{_esc(log['cmd'])}</code>")
 
                 text = (
-                    "━━━━━━━━━━━━━━━━━━━━━━\n"
-                    "📝 *Последние события*\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━\n"
-                    "\n" + "\n".join(lines)
+                    "╔══════════════════════╗\n"
+                    "📜 <b>ЖУРНАЛ СОБЫТИЙ (ЛОГИ)</b>\n"
+                    "╚══════════════════════╝\n\n"
+                    "" + "\n".join(lines)
                 )
 
             await callback.message.edit_text(text, reply_markup=_back_kb())
@@ -256,9 +255,9 @@ class TelegramPanel:
                 return
 
             text = (
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                "⚙️ *Настройки*\n"
-                "━━━━━━━━━━━━━━━━━━━━━━"
+                "╔══════════════════════╗\n"
+                "⚙️ <b>КОНФИГУРАЦИЯ БОТА</b>\n"
+                "╚══════════════════════╝"
             )
             await callback.message.edit_text(text, reply_markup=_settings_kb())
             await callback.answer()
@@ -269,24 +268,24 @@ class TelegramPanel:
                 await callback.answer("⛔ Нет доступа", show_alert=True)
                 return
 
-            afk_list = "\n".join(f"  {i+1}. {msg}" for i, msg in enumerate(config.AFK_MESSAGES))
+            afk_list = "\n".join(f"  🔹 {i+1}. <i>{_esc(msg)}</i>" for i, msg in enumerate(config.AFK_MESSAGES))
             text = (
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                "📝 *AFK-сообщения*\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                "\nТекущие сообщения:\n"
-                f"{afk_list}\n"
-                "\n_Чтобы изменить — отредактируй список_\n"
-                "_AFK\\_MESSAGES в файле config.py_"
+                "╔══════════════════════╗\n"
+                "📝 <b>СПИСОК AFK-ОТВЕТОВ</b>\n"
+                "╚══════════════════════╝\n\n"
+                "<b>Текущие шаблоны ответов:</b>\n"
+                f"{afk_list}\n\n"
+                "ℹ️ <i>Для изменения отредактируйте переменную AFK_MESSAGES в конфигурационном файле config.py</i>"
             )
             await callback.message.edit_text(text, reply_markup=_back_kb())
             await callback.answer()
 
         @self.dp.callback_query(F.data == "back_main")
-        async def cb_back_main(callback: CallbackQuery):
+        async def cb_back_main(callback: CallbackQuery, state: FSMContext):
             if not _is_owner(callback.from_user.id):
                 await callback.answer("⛔ Нет доступа", show_alert=True)
                 return
+            await state.clear()
             await callback.message.edit_text(
                 _build_main_text_simple(self.state),
                 reply_markup=_main_menu_kb(self.state),
@@ -294,15 +293,173 @@ class TelegramPanel:
             await callback.answer()
 
         @self.dp.callback_query(F.data == "refresh")
-        async def cb_refresh(callback: CallbackQuery):
+        async def cb_refresh(callback: CallbackQuery, state: FSMContext):
             if not _is_owner(callback.from_user.id):
                 await callback.answer("⛔ Нет доступа", show_alert=True)
                 return
+            await state.clear()
             await callback.message.edit_text(
                 _build_main_text_simple(self.state),
                 reply_markup=_main_menu_kb(self.state),
             )
             await callback.answer("🔄 Обновлено!")
+
+        @self.dp.callback_query(F.data == "toggle_ai")
+        async def cb_toggle_ai(callback: CallbackQuery, state: FSMContext):
+            if not _is_owner(callback.from_user.id):
+                await callback.answer("⛔ Нет доступа", show_alert=True)
+                return
+            await state.clear()
+            self.state.is_ai_active = not self.state.is_ai_active
+            status_str = "включён" if self.state.is_ai_active else "выключен"
+            self.state.add_log("Telegram", f"ИИ автоответчик {status_str}")
+            await callback.answer(f"🤖 Режим ИИ: {'🟢 Включен' if self.state.is_ai_active else '🔴 Выключен'}")
+            await callback.message.edit_text(
+                _build_main_text_simple(self.state),
+                reply_markup=_main_menu_kb(self.state),
+            )
+
+        @self.dp.callback_query(F.data == "tts_prompt")
+        async def cb_tts_prompt(callback: CallbackQuery, state: FSMContext):
+            if not _is_owner(callback.from_user.id):
+                await callback.answer("⛔ Нет доступа", show_alert=True)
+                return
+
+            if not self.state.current_voice:
+                await callback.answer("❌ Бот не подключен к голосовому каналу!", show_alert=True)
+                return
+
+            await state.set_state(TTSStates.waiting_for_tts_text)
+
+            keyboard = [[InlineKeyboardButton(text="◀️ Отмена", callback_data="back_main")]]
+            await callback.message.edit_text(
+                "🗣 <b>Озвучка текста в голосовой канал Discord</b>\n\n"
+                "Введите текст, который вы хотите произнести в войсе:",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+            )
+            await callback.answer()
+
+        @self.dp.message(Command("say"))
+        async def cmd_say(message: Message, state: FSMContext):
+            if not _is_owner(message.from_user.id):
+                return
+            await state.clear()
+
+            args = message.text.split(maxsplit=1)
+            if len(args) < 2 or not args[1].strip():
+                await message.answer("⚠️ Использование: <code>/say привет всем</code>")
+                return
+
+            text_to_say = args[1].strip()
+
+            if not self.state.current_voice:
+                await message.answer("❌ Бот не в войсе! Зайдите сначала через Discord или командами <code>!call</code> / <code>!dota</code>.")
+                return
+
+            if self.discord_bot:
+                success = await self.discord_bot.play_tts(text_to_say)
+                if success:
+                    self.state.add_log("Telegram", f"/say: {text_to_say[:20]}")
+                    await message.answer(f"🗣 Озвучиваю в войсе: <i>{_esc(text_to_say)}</i>")
+                else:
+                    await message.answer("❌ Не удалось воспроизвести озвучку.")
+            else:
+                await message.answer("❌ Ошибка связи с Discord-клиентом.")
+
+        @self.dp.message(TTSStates.waiting_for_tts_text)
+        async def handle_tts_text(message: Message, state: FSMContext):
+            if not _is_owner(message.from_user.id):
+                return
+
+            if not message.text:
+                await message.answer("⚠️ Пожалуйста, отправьте текстовое сообщение.")
+                return
+
+            text_to_say = message.text.strip()
+            await state.clear()
+
+            if not text_to_say:
+                await message.answer("⚠️ Текст не может быть пустым.")
+                await message.answer(
+                    _build_main_text_simple(self.state),
+                    reply_markup=_main_menu_kb(self.state),
+                )
+                return
+
+            if not self.state.current_voice:
+                await message.answer("❌ Бот не подключен к голосовому каналу!")
+                await message.answer(
+                    _build_main_text_simple(self.state),
+                    reply_markup=_main_menu_kb(self.state),
+                )
+                return
+
+            if self.discord_bot:
+                success = await self.discord_bot.play_tts(text_to_say)
+                if success:
+                    self.state.add_log("Telegram", f"TTS: {text_to_say[:20]}")
+                    await message.answer(
+                        f"🗣 Озвучиваю в войсе: <i>{_esc(text_to_say)}</i>\n\n" + _build_main_text_simple(self.state),
+                        reply_markup=_main_menu_kb(self.state),
+                    )
+                else:
+                    await message.answer(
+                        "❌ Не удалось воспроизвести озвучку.\n\n" + _build_main_text_simple(self.state),
+                        reply_markup=_main_menu_kb(self.state),
+                    )
+            else:
+                await message.answer(
+                    "❌ Ошибка связи с Discord-клиентом.\n\n" + _build_main_text_simple(self.state),
+                    reply_markup=_main_menu_kb(self.state),
+                )
+
+        @self.dp.message(F.voice)
+        async def handle_telegram_voice(message: Message, state: FSMContext):
+            if not _is_owner(message.from_user.id):
+                return
+            await state.clear()
+
+            if not self.state.current_voice:
+                await message.answer("❌ Бот не подключен к голосовому каналу! Зайдите сначала в войс через Discord (или используйте команды <code>!call</code> / <code>!dota</code>).")
+                return
+
+            status_msg = await message.answer("📥 Загружаю голосовое сообщение...")
+
+            import uuid
+            temp_filename = f"/tmp/tg_voice_{uuid.uuid4().hex}.ogg"
+
+            try:
+                # Получаем и скачиваем файл
+                file_id = message.voice.file_id
+                file = await self.bot.get_file(file_id)
+                await self.bot.download_file(file.file_path, temp_filename)
+
+                await status_msg.edit_text("🔊 Воспроизвожу голосовое сообщение в Discord...")
+
+                if self.discord_bot:
+                    success = await self.discord_bot.play_audio_file(temp_filename, delete_after=True)
+                    if success:
+                        self.state.add_log("Telegram", "Голосовое из TG")
+                        await status_msg.edit_text("✅ Голосовое сообщение воспроизведено в войсе!")
+                    else:
+                        await status_msg.edit_text("❌ Не удалось воспроизвести голосовое сообщение.")
+                else:
+                    await status_msg.edit_text("❌ Ошибка связи с Discord-клиентом.")
+
+            except Exception as e:
+                print(f"❌ Ошибка при загрузке/проигрывании голосового из TG: {e}")
+                await status_msg.edit_text(f"❌ Произошла ошибка при обработке голосового: {e}")
+
+    async def send_main_menu(self):
+        """Отправить главное меню (панель управления) в Telegram."""
+        try:
+            await self.bot.send_message(
+                chat_id=config.TELEGRAM_CHAT_ID,
+                text=_build_main_text_simple(self.state),
+                reply_markup=_main_menu_kb(self.state),
+            )
+        except Exception as e:
+            print(f"❌ Ошибка отправки главного меню в Telegram: {e}")
 
     async def send_notification(self, text: str):
         """Отправить уведомление владельцу."""
@@ -325,22 +482,19 @@ class TelegramPanel:
 
 
 def _build_main_text_simple(state) -> str:
-    """Текст главного меню (обычный Markdown)."""
-    status = "🟢 Активен" if state.is_active else "🔴 Отключён"
-    voice = f"🔊 `{state.current_voice}`" if state.current_voice else "🔇 Не подключён"
+    """Текст главного меню (HTML)."""
+    status = "🟢 <b>АКТИВЕН</b>" if state.is_active else "💤 <b>ВЫКЛЮЧЕН</b> (режим ожидания)"
+    voice = f"🔊 <code>{_esc(state.current_voice)}</code>" if state.current_voice else "🔇 <i>Не в войсе</i>"
     uptime = _format_uptime(state.uptime_start) if state.uptime_start else "—"
-    discord_user = f"`{state.discord_username}`" if state.discord_username else "⏳ Подключение..."
+    discord_user = f"👤 <code>{_esc(state.discord_username)}</code>" if state.discord_username else "⏳ <i>Авторизация...</i>"
 
     return (
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🎮 *Discord Self-Bot*\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "\n"
-        f"👤 Аккаунт: {discord_user}\n"
-        f"📡 Статус: {status}\n"
-        f"🎙️ Войс: {voice}\n"
-        f"⏱️ Uptime: `{uptime}`\n"
-        "\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "Выбери действие 👇"
+        "╔══════════════════════╗\n"
+        "🎮 <b>DISCORD SELF-BOT PANEL</b>\n"
+        "╚══════════════════════╝\n\n"
+        f"<b>👤 Аккаунт:</b> {discord_user}\n"
+        f"<b>⚡ Режим:</b> {status}\n"
+        f"<b>🎙️ Войс:</b> {voice}\n"
+        f"<b>⏱️ Uptime:</b> <code>{uptime}</code>\n\n"
+        "📊 <i>Выберите действие на панели управления ниже:</i>"
     )

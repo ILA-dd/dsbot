@@ -21,6 +21,10 @@ DISCORD_TOKEN: str = _require("DISCORD_TOKEN")
 TELEGRAM_BOT_TOKEN: str = _require("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID: int = int(_require("TELEGRAM_CHAT_ID"))
 
+# === Дополнительно (ИИ-автоответчик) ===
+GEMINI_API_KEY: str | None = os.getenv("GEMINI_API_KEY")
+OPENROUTER_API_KEY: str | None = os.getenv("OPENROUTER_API_KEY")
+
 # === AFK-сообщения ===
 AFK_MESSAGES: list[str] = [
     "Сейчас отошёл, скоро буду 🕐",
