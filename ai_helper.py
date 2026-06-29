@@ -198,3 +198,67 @@ async def analyze_style(chat_history: list[dict], self_username: str) -> str:
                 return res
 
     return "Отвечай коротко и просто."
+
+
+import base64
+
+async def transcribe_audio(filepath: str) -> str | None:
+    """Распознает речь из аудиофайла с помощью Gemini API."""
+    if not config.GEMINI_API_KEY:
+        print("❌ Gemini API Key is missing for transcription.")
+        return None
+
+    try:
+        # Читаем файл и кодируем в base64
+        with open(filepath, "rb") as f:
+            audio_bytes = f.read()
+        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+
+        mime_type = "audio/ogg"
+        if filepath.endswith(".mp3"):
+            mime_type = "audio/mp3"
+        elif filepath.endswith(".wav"):
+            mime_type = "audio/wav"
+
+        # Формируем payload для Gemini API
+        payload = {
+            "contents": [{
+                "parts": [
+                    {
+                        "inlineData": {
+                            "mimeType": mime_type,
+                            "data": audio_b64
+                        }
+                    },
+                    {
+                        "text": "Распознай русскую речь из этого аудиофайла и напиши только текст сообщения, без лишних комментариев и форматирования."
+                    }
+                ]
+            }],
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+            ]
+        }
+
+        # Используем те же модели, что и для генерации текста
+        gemini_models = [
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-2.0-flash",
+            "gemini-flash-latest"
+        ]
+
+        for model in gemini_models:
+            print(f"🤖 Пробую распознать аудио через Gemini ({model})...")
+            res = await _call_gemini(model, payload)
+            if res:
+                return res
+
+    except Exception as e:
+        print(f"❌ Ошибка при распознавании аудиофайла через Gemini: {e}")
+    
+    return None
+
